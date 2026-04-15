@@ -1,0 +1,19 @@
+[package]
+name = "claumini-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+claumini-core = { path = "../claumini-core" }
+schemars = "1.0.4"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

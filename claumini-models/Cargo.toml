@@ -1,0 +1,17 @@
+[package]
+name = "claumini-models"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+claumini-core = { path = "../claumini-core" }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url = "2.5.7"
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock = "0.6.5"
