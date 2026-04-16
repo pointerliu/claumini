@@ -254,6 +254,7 @@ pub struct PromptAgent<I, O> {
     input_encoder: InputEncoder<I>,
     output_decoder: OutputDecoder<O>,
     output_schema: Option<Value>,
+    max_output_tokens: Option<u32>,
 }
 
 impl<I, O> Clone for PromptAgent<I, O> {
@@ -271,6 +272,7 @@ impl<I, O> Clone for PromptAgent<I, O> {
             input_encoder: Arc::clone(&self.input_encoder),
             output_decoder: Arc::clone(&self.output_decoder),
             output_schema: self.output_schema.clone(),
+            max_output_tokens: self.max_output_tokens,
         }
     }
 }
@@ -405,6 +407,7 @@ where
         if let Some(output_schema) = &self.output_schema {
             request = request.with_response_schema(output_schema.clone());
         }
+        request.max_output_tokens = self.max_output_tokens;
         request
     }
 
@@ -755,6 +758,7 @@ pub struct PromptAgentBuilder<I = Payload, O = Payload> {
     input_encoder: InputEncoder<I>,
     output_decoder: OutputDecoder<O>,
     output_schema: Option<Value>,
+    max_output_tokens: Option<u32>,
     marker: PhantomData<(I, O)>,
 }
 
@@ -772,6 +776,7 @@ impl PromptAgentBuilder {
             input_encoder: Arc::new(Ok::<_, AgentError>),
             output_decoder: Arc::new(Ok::<_, AgentError>),
             output_schema: None,
+            max_output_tokens: Some(32000),
             marker: PhantomData,
         }
     }
@@ -785,6 +790,11 @@ impl<I, O> PromptAgentBuilder<I, O> {
 
     pub fn limits(mut self, limits: RuntimeLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    pub fn max_output_tokens(mut self, tokens: Option<u32>) -> Self {
+        self.max_output_tokens = tokens;
         self
     }
 
@@ -949,6 +959,7 @@ impl<I, O> PromptAgentBuilder<I, O> {
             input_encoder: self.input_encoder,
             output_decoder: self.output_decoder,
             output_schema: self.output_schema,
+            max_output_tokens: self.max_output_tokens,
         })
     }
 
@@ -968,6 +979,7 @@ impl<I, O> PromptAgentBuilder<I, O> {
             input_encoder: Arc::new(encoder),
             output_decoder: self.output_decoder,
             output_schema: self.output_schema,
+            max_output_tokens: self.max_output_tokens,
             marker: PhantomData,
         }
     }
@@ -996,6 +1008,7 @@ impl<I, O> PromptAgentBuilder<I, O> {
             input_encoder: self.input_encoder,
             output_decoder: Arc::new(decoder),
             output_schema: output_schema.expect("output schema should serialize"),
+            max_output_tokens: self.max_output_tokens,
             marker: PhantomData,
         }
     }
@@ -1175,6 +1188,7 @@ where
             input_encoder,
             output_decoder,
             output_schema,
+            max_output_tokens,
         } = self;
 
         PromptAgent {
@@ -1196,6 +1210,7 @@ where
                 output_encoder(typed_output)
             }),
             output_schema,
+            max_output_tokens,
         }
     }
 

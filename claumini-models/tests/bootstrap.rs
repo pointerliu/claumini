@@ -16,6 +16,7 @@ fn openai_config() -> OpenAiCompatibleConfig {
         base_url: "https://api.example.com/v1".into(),
         api_key: "test-key".into(),
         model: "gpt-test".into(),
+        max_tokens: None,
     }
 }
 
@@ -105,6 +106,7 @@ fn openai_config_rejects_blank_fields_and_invalid_url() {
         base_url: "not-a-url".into(),
         api_key: " ".into(),
         model: "".into(),
+        max_tokens: None,
     })
     .expect_err("invalid config should be rejected");
 
@@ -158,6 +160,7 @@ async fn openai_provider_posts_chat_completions_and_normalizes_response() {
         base_url: server.uri(),
         api_key: "test-key".into(),
         model: "gpt-test".into(),
+        max_tokens: None,
     })
     .expect("provider should build");
 
@@ -323,6 +326,7 @@ async fn openai_provider_round_trips_assistant_tool_call_turns_in_follow_up_requ
         base_url: server.uri(),
         api_key: "test-key".into(),
         model: "gpt-test".into(),
+        max_tokens: None,
     })
     .expect("provider should build");
 

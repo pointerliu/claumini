@@ -40,6 +40,7 @@ impl LiveProviderConfig {
             base_url: self.api_base.clone(),
             api_key: self.api_key.clone(),
             model: self.model.clone(),
+            max_tokens: None,
         })
         .expect("live provider config should be valid")
     }

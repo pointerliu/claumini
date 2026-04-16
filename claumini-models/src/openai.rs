@@ -72,6 +72,7 @@ impl OpenAiCompatibleProvider {
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ProviderError> {
+        let chat_request = OpenAiChatRequest::from_request(&self.config.model, request.clone())?;
         let response = self
             .client
             .post(format!(
@@ -79,10 +80,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 self.config.base_url.trim_end_matches('/')
             ))
             .bearer_auth(&self.config.api_key)
-            .json(&OpenAiChatRequest::from_request(
-                &self.config.model,
-                request,
-            )?)
+            .json(&chat_request)
             .send()
             .await
             .map_err(map_transport_error)?;
@@ -118,7 +116,7 @@ struct OpenAiChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<OpenAiResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+max_tokens: Option<u32>,
 }
 
 impl OpenAiChatRequest {

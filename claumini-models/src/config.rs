@@ -16,6 +16,7 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub max_tokens: Option<u32>,
 }
 
 impl OpenAiCompatibleConfig {
@@ -45,6 +46,7 @@ impl OpenAiConfig {
             base_url,
             api_key: self.api_key,
             model: self.model,
+            max_tokens: None,
         }
     }
 }
