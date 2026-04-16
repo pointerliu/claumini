@@ -1004,6 +1004,130 @@ async fn prompt_agent_parses_fallback_final_structured_output() {
 }
 
 #[tokio::test]
+async fn prompt_agent_omits_finish_tool_when_provider_supports_structured_output() {
+    let provider = ScriptedProvider::new(vec![
+        ModelResponse {
+            message: None,
+            tool_calls: vec![claumini_core::ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: json!({"question": "Where?"}),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+        },
+        ModelResponse::text(r#"{"answer":"final answer"}"#),
+    ])
+    .with_capabilities(ProviderCapabilities {
+        native_tool_calling: true,
+        structured_output: true,
+        ..ProviderCapabilities::default()
+    });
+
+    let agent = PromptAgentBuilder::new(Arc::new(provider.clone()))
+        .tool(LookupTool)
+        .json_input::<UserQuestion>()
+        .json_output::<AgentAnswer>()
+        .build()
+        .expect("agent should build");
+
+    let PromptSession { output, .. } = agent
+        .run(
+            UserQuestion {
+                question: "Where?".into(),
+            },
+            "session-native-structured-output",
+        )
+        .await
+        .expect("prompt agent should finish");
+
+    assert_eq!(
+        output,
+        AgentAnswer {
+            answer: "final answer".into()
+        }
+    );
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lookup"]
+    );
+    assert!(requests[0].response_schema.is_some());
+    assert_eq!(
+        requests[1]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lookup"]
+    );
+}
+
+#[tokio::test]
+async fn prompt_agent_omits_reserved_runtime_tools_when_provider_supports_structured_output() {
+    let provider = ScriptedProvider::new(vec![
+        ModelResponse {
+            message: None,
+            tool_calls: vec![claumini_core::ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: json!({"question": "Where?"}),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+        },
+        ModelResponse::text(r#"{"answer":"final answer"}"#),
+    ])
+    .with_capabilities(ProviderCapabilities {
+        native_tool_calling: true,
+        structured_output: true,
+        ..ProviderCapabilities::default()
+    });
+    let registry = build_skill_registry();
+
+    let agent = PromptAgentBuilder::new(Arc::new(provider.clone()))
+        .tool(LookupTool)
+        .skills(registry)
+        .json_input::<UserQuestion>()
+        .json_output::<AgentAnswer>()
+        .build()
+        .expect("agent should build");
+
+    let _ = agent
+        .run(
+            UserQuestion {
+                question: "Where?".into(),
+            },
+            "session-native-structured-output-skills",
+        )
+        .await
+        .expect("prompt agent should finish");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lookup"]
+    );
+    assert_eq!(
+        requests[1]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lookup"]
+    );
+}
+
+#[tokio::test]
 async fn prompt_agent_injects_skill_metadata_and_runtime_load_skill_tool() {
     let provider = ScriptedProvider::new(vec![ModelResponse::text("done")]);
     let registry = build_skill_registry();

@@ -397,8 +397,8 @@ where
         session: &SessionRecord,
         capabilities: claumini_core::ProviderCapabilities,
     ) -> ModelRequest {
-        let mut request =
-            ModelRequest::new(session.transcript.clone()).with_tools(self.tool_schemas.clone());
+        let mut request = ModelRequest::new(session.transcript.clone())
+            .with_tools(self.request_tool_schemas(capabilities));
         if let Some(system_prompt) = self.effective_system_prompt(capabilities) {
             request = request.with_system_prompt(system_prompt);
         }
@@ -430,6 +430,22 @@ where
         }
 
         Err(AgentError::Provider(ProviderError::Timeout))
+    }
+
+    fn request_tool_schemas(
+        &self,
+        capabilities: claumini_core::ProviderCapabilities,
+    ) -> Vec<ToolSchema> {
+        if capabilities.structured_output && self.output_schema.is_some() {
+            return self
+                .tool_schemas
+                .iter()
+                .filter(|schema| !RESERVED_TOOL_NAMES.contains(&schema.name.as_str()))
+                .cloned()
+                .collect();
+        }
+
+        self.tool_schemas.clone()
     }
 
     fn effective_system_prompt(
