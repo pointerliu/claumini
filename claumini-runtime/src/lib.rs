@@ -18,6 +18,19 @@ pub use runtime_tools::{
 pub use session::{ChildHandleRecord, SessionRecord, SessionState, ToolCallRecord};
 pub use skills::{SkillMetadata, SkillRegistry};
 
+/// Build a `String` user message from a struct by binding named fields into a
+/// `format!` template.
+///
+/// Equivalent to `format!($tmpl, field = input.field, ...)`. Placeholder names
+/// in the template must match the listed field names (checked by the compiler).
+#[macro_export]
+macro_rules! prompt_template {
+    ($tmpl:literal, $input:expr, { $($field:ident),+ $(,)? }) => {{
+        let __input = &$input;
+        format!($tmpl, $($field = &__input.$field),+)
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -75,6 +88,23 @@ mod tests {
         session.current_input = Some(Payload::text("current input"));
 
         assert_eq!(session.current_input, Some(Payload::text("current input")));
+    }
+
+    #[test]
+    fn prompt_template_substitutes_struct_fields() {
+        struct Case {
+            a: String,
+            b: u32,
+        }
+        let c = Case {
+            a: "hi".to_string(),
+            b: 7,
+        };
+        let s = crate::prompt_template!("{a}/{b}", c, { a, b });
+        assert_eq!(s, "hi/7");
+        // struct still usable after macro — fields were borrowed, not moved.
+        assert_eq!(c.a, "hi");
+        assert_eq!(c.b, 7);
     }
 
     #[test]

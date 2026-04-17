@@ -870,6 +870,14 @@ impl<I, O> PromptAgentBuilder<I, O> {
         })
     }
 
+    pub fn user_prompt<T, F>(self, formatter: F) -> PromptAgentBuilder<T, O>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(T) -> String + Send + Sync + 'static,
+    {
+        self.with_input_encoder(move |value: T| Ok(Payload::text(formatter(value))))
+    }
+
     pub fn text_output(self) -> PromptAgentBuilder<I, String> {
         self.with_output_decoder(decode_text_output)
     }
