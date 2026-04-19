@@ -8,3 +8,6 @@ target/
 .env
 .env.*
 !.env.example
+spec.md
+SPEC.md
+docs/

@@ -5,7 +5,6 @@ members = [
     "claumini-tools",
     "claumini-tools-macros",
     "claumini-models",
-    "agentless_demo",
 ]
 resolver = "2"
 
