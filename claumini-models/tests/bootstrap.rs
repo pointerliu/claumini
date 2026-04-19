@@ -85,7 +85,7 @@ fn claude_provider_reports_expected_capabilities() {
 
     let capabilities = provider.capabilities();
     assert!(capabilities.native_tool_calling);
-    assert!(!capabilities.structured_output);
+    assert!(capabilities.structured_output);
     assert!(!capabilities.reasoning_control);
     assert!(!capabilities.image_input);
 }
@@ -209,21 +209,22 @@ async fn openai_provider_posts_chat_completions_and_normalizes_response() {
                             "required": ["id"]
                         }
                     }
-                }
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_output",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "answer": { "type": "string" }
-                        },
-                        "required": ["answer"]
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "__claumini_final_answer",
+                        "description": "Return the final answer as a structured object matching the requested schema. Call this exactly once, after all other investigation is complete, with the definitive answer. Do not call other tools after this one.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "answer": { "type": "string" }
+                            },
+                            "required": ["answer"]
+                        }
                     }
                 }
-            },
+            ],
             "max_tokens": 256
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -571,6 +572,119 @@ async fn claude_provider_round_trips_assistant_tool_call_turns_in_follow_up_requ
             .content
             .as_text(),
         Some("Final answer")
+    );
+}
+
+#[tokio::test]
+async fn openai_provider_surfaces_synthetic_final_answer_as_assistant_text() {
+    let server = MockServer::start().await;
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "gpt-test".into(),
+        max_tokens: None,
+    })
+    .expect("provider should build");
+
+    let request = ModelRequest::new(vec![Message::new(
+        MessageRole::User,
+        Payload::text("Where?"),
+    )])
+    .with_response_schema(json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } },
+        "required": ["answer"]
+    }));
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "call_final",
+                                "type": "function",
+                                "function": {
+                                    "name": "__claumini_final_answer",
+                                    "arguments": "{\"answer\":\"SF\"}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let response = provider
+        .complete(request)
+        .await
+        .expect("request should succeed");
+
+    assert!(response.tool_calls.is_empty());
+    assert_eq!(response.finish_reason, claumini_core::FinishReason::Stop);
+    assert_eq!(
+        response
+            .message
+            .expect("assistant message")
+            .content
+            .as_text(),
+        Some("{\"answer\":\"SF\"}")
+    );
+}
+
+#[tokio::test]
+async fn claude_provider_surfaces_synthetic_final_answer_as_assistant_text() {
+    let server = MockServer::start().await;
+    let provider = ClaudeProvider::new_with_base_url(claude_config(), server.uri())
+        .expect("provider should build");
+
+    let request = ModelRequest::new(vec![Message::new(
+        MessageRole::User,
+        Payload::text("Where?"),
+    )])
+    .with_response_schema(json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } },
+        "required": ["answer"]
+    }));
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_final",
+                    "name": "__claumini_final_answer",
+                    "input": { "answer": "SF" }
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let response = provider
+        .complete(request)
+        .await
+        .expect("request should succeed");
+
+    assert!(response.tool_calls.is_empty());
+    assert_eq!(response.finish_reason, claumini_core::FinishReason::Stop);
+    assert_eq!(
+        response
+            .message
+            .expect("assistant message")
+            .content
+            .as_text(),
+        Some("{\"answer\":\"SF\"}")
     );
 }
 

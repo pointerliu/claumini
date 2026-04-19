@@ -7,7 +7,10 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ConfigError, OpenAiCompatibleConfig, OpenAiConfig};
+use crate::{
+    ConfigError, FINAL_ANSWER_TOOL_DESCRIPTION, FINAL_ANSWER_TOOL_NAME, OpenAiCompatibleConfig,
+    OpenAiConfig,
+};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -114,8 +117,6 @@ struct OpenAiChatRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<OpenAiResponseFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
 }
 
@@ -132,17 +133,25 @@ impl OpenAiChatRequest {
             messages.push(OpenAiRequestMessage::from_message(message)?);
         }
 
+        let mut tools: Vec<OpenAiTool> =
+            request.tools.iter().map(OpenAiTool::from_tool).collect();
+        if let Some(schema) = request.response_schema {
+            if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == FINAL_ANSWER_TOOL_NAME)
+            {
+                return Err(ProviderError::Message(format!(
+                    "tool name '{FINAL_ANSWER_TOOL_NAME}' is reserved for structured output"
+                )));
+            }
+            tools.push(OpenAiTool::final_answer(schema));
+        }
+
         Ok(Self {
             model: model.to_owned(),
             messages,
-            tools: request.tools.iter().map(OpenAiTool::from_tool).collect(),
-            response_format: request.response_schema.map(|schema| OpenAiResponseFormat {
-                kind: "json_schema",
-                json_schema: OpenAiJsonSchema {
-                    name: "structured_output",
-                    schema,
-                },
-            }),
+            tools,
             max_tokens: request.max_output_tokens,
         })
     }
@@ -245,6 +254,17 @@ impl OpenAiTool {
             },
         }
     }
+
+    fn final_answer(schema: Value) -> Self {
+        Self {
+            kind: "function",
+            function: OpenAiFunctionDefinition {
+                name: FINAL_ANSWER_TOOL_NAME.to_owned(),
+                description: FINAL_ANSWER_TOOL_DESCRIPTION.to_owned(),
+                parameters: schema,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -252,19 +272,6 @@ struct OpenAiFunctionDefinition {
     name: String,
     description: String,
     parameters: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiResponseFormat {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    json_schema: OpenAiJsonSchema,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiJsonSchema {
-    name: &'static str,
-    schema: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,6 +315,34 @@ fn normalize_response(body: OpenAiChatResponse) -> Result<ModelResponse, Provide
         tool_calls: raw_tool_calls,
     } = choice.message;
 
+    let mut tool_calls = Vec::with_capacity(raw_tool_calls.len());
+    let mut final_answer: Option<Value> = None;
+    for call in raw_tool_calls {
+        let arguments: Value = serde_json::from_str(&call.function.arguments).map_err(|err| {
+            ProviderError::Message(format!("failed to parse openai tool arguments: {err}"))
+        })?;
+        if call.function.name == FINAL_ANSWER_TOOL_NAME {
+            final_answer = Some(arguments);
+            continue;
+        }
+        tool_calls.push(ToolCall {
+            id: call.id,
+            name: call.function.name,
+            arguments,
+        });
+    }
+
+    if let Some(arguments) = final_answer {
+        let text = serde_json::to_string(&arguments).map_err(|err| {
+            ProviderError::Message(format!("failed to serialize final answer: {err}"))
+        })?;
+        return Ok(ModelResponse {
+            message: Some(Message::new(MessageRole::Assistant, Payload::text(text))),
+            tool_calls,
+            finish_reason: FinishReason::Stop,
+        });
+    }
+
     let message = content.and_then(|content| {
         if content.is_empty() {
             None
@@ -315,22 +350,6 @@ fn normalize_response(body: OpenAiChatResponse) -> Result<ModelResponse, Provide
             Some(Message::new(MessageRole::Assistant, Payload::text(content)))
         }
     });
-
-    let tool_calls = raw_tool_calls
-        .into_iter()
-        .map(|call| {
-            let arguments: Value =
-                serde_json::from_str(&call.function.arguments).map_err(|err| {
-                    ProviderError::Message(format!("failed to parse openai tool arguments: {err}"))
-                })?;
-
-            Ok(ToolCall {
-                id: call.id,
-                name: call.function.name,
-                arguments,
-            })
-        })
-        .collect::<Result<Vec<_>, ProviderError>>()?;
 
     Ok(ModelResponse {
         finish_reason: map_finish_reason(choice.finish_reason.as_deref(), !tool_calls.is_empty()),

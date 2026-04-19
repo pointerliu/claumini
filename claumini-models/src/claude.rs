@@ -6,7 +6,10 @@ use claumini_core::{
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::{ClaudeConfig, ConfigError, config::validate_http_url};
+use crate::{
+    ClaudeConfig, ConfigError, FINAL_ANSWER_TOOL_DESCRIPTION, FINAL_ANSWER_TOOL_NAME,
+    config::validate_http_url,
+};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -74,7 +77,7 @@ impl ModelProvider for ClaudeProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             native_tool_calling: true,
-            structured_output: false,
+            structured_output: true,
             reasoning_control: false,
             image_input: false,
         }
@@ -107,11 +110,25 @@ impl ClaudeRequest {
             }
         }
 
+        let mut tools: Vec<ClaudeTool> = request.tools.iter().map(ClaudeTool::from_tool).collect();
+        if let Some(schema) = request.response_schema {
+            if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == FINAL_ANSWER_TOOL_NAME)
+            {
+                return Err(ProviderError::Message(format!(
+                    "tool name '{FINAL_ANSWER_TOOL_NAME}' is reserved for structured output"
+                )));
+            }
+            tools.push(ClaudeTool::final_answer(schema));
+        }
+
         Ok(Self {
             model: model.to_owned(),
             system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
             messages,
-            tools: request.tools.iter().map(ClaudeTool::from_tool).collect(),
+            tools,
             max_tokens: request.max_output_tokens.unwrap_or(1024),
         })
     }
@@ -215,6 +232,14 @@ impl ClaudeTool {
             input_schema: tool.input_schema.clone(),
         }
     }
+
+    fn final_answer(schema: serde_json::Value) -> Self {
+        Self {
+            name: FINAL_ANSWER_TOOL_NAME.to_owned(),
+            description: FINAL_ANSWER_TOOL_DESCRIPTION.to_owned(),
+            input_schema: schema,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +267,7 @@ enum ClaudeResponseContent {
 fn normalize_response(body: ClaudeResponse) -> Result<ModelResponse, ProviderError> {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut final_answer: Option<serde_json::Value> = None;
 
     for block in body.content {
         match block {
@@ -251,6 +277,10 @@ fn normalize_response(body: ClaudeResponse) -> Result<ModelResponse, ProviderErr
                 }
             }
             ClaudeResponseContent::ToolUse { id, name, input } => {
+                if name == FINAL_ANSWER_TOOL_NAME {
+                    final_answer = Some(input);
+                    continue;
+                }
                 tool_calls.push(ToolCall {
                     id,
                     name,
@@ -259,6 +289,17 @@ fn normalize_response(body: ClaudeResponse) -> Result<ModelResponse, ProviderErr
             }
             ClaudeResponseContent::Other => {}
         }
+    }
+
+    if let Some(arguments) = final_answer {
+        let text = serde_json::to_string(&arguments).map_err(|err| {
+            ProviderError::Message(format!("failed to serialize final answer: {err}"))
+        })?;
+        return Ok(ModelResponse {
+            message: Some(Message::new(MessageRole::Assistant, Payload::text(text))),
+            tool_calls,
+            finish_reason: FinishReason::Stop,
+        });
     }
 
     Ok(ModelResponse {
