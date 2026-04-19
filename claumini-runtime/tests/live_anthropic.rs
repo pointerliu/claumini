@@ -7,7 +7,7 @@ use claumini_core::{
     Message, MessageRole, ModelProvider, ModelRequest, Payload, Tool, ToolDescriptor, ToolError,
     ToolSchema,
 };
-use claumini_models::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
+use claumini_models::{ClaudeConfig, ClaudeProvider};
 use claumini_runtime::{PromptAgentBuilder, SkillRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -16,33 +16,34 @@ use tempfile::tempdir;
 static LOAD_ENV: Once = Once::new();
 
 #[derive(Debug, Clone)]
-struct LiveProviderConfig {
+struct LiveAnthropicConfig {
     api_base: String,
     api_key: String,
     model: String,
 }
 
-impl LiveProviderConfig {
+impl LiveAnthropicConfig {
     fn from_env() -> Self {
         LOAD_ENV.call_once(|| {
             let _ = dotenvy::from_filename(".env");
         });
 
         Self {
-            api_base: required_env("CLAUMINI_LIVE_API_BASE"),
-            api_key: required_env("CLAUMINI_LIVE_API_KEY"),
-            model: required_env("CLAUMINI_LIVE_MODEL"),
+            api_base: required_env("ANTHROPIC_API_BASE"),
+            api_key: required_env("ANTHROPIC_API_KEY"),
+            model: required_env("ANTHROPIC_MODEL"),
         }
     }
 
-    fn provider(&self) -> OpenAiCompatibleProvider {
-        OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: self.api_base.clone(),
-            api_key: self.api_key.clone(),
-            model: self.model.clone(),
-            max_tokens: None,
-        })
-        .expect("live provider config should be valid")
+    fn provider(&self) -> ClaudeProvider {
+        ClaudeProvider::new_with_base_url(
+            ClaudeConfig {
+                api_key: self.api_key.clone(),
+                model: self.model.clone(),
+            },
+            self.api_base.clone(),
+        )
+        .expect("live anthropic provider config should be valid")
     }
 }
 
@@ -51,16 +52,17 @@ fn required_env(name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenAI-compatible credentials in .env"]
-async fn live_provider_returns_basic_text_response() {
-    let provider = LiveProviderConfig::from_env().provider();
+#[ignore = "requires live Anthropic-compatible credentials in .env"]
+async fn live_anthropic_provider_returns_basic_text_response() {
+    let provider = LiveAnthropicConfig::from_env().provider();
     let response = provider
         .complete(
             ModelRequest::new(vec![Message::new(
                 MessageRole::User,
                 Payload::text("Reply with exactly BASIC_OK and nothing else."),
             )])
-            .with_system_prompt("Follow the user's output format exactly."),
+            .with_system_prompt("Follow the user's output format exactly.")
+            .with_max_output_tokens(2048),
         )
         .await
         .expect("basic live completion should succeed");
@@ -81,9 +83,9 @@ async fn live_provider_returns_basic_text_response() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenAI-compatible credentials in .env"]
-async fn live_provider_emits_native_tool_calls() {
-    let provider = LiveProviderConfig::from_env().provider();
+#[ignore = "requires live Anthropic-compatible credentials in .env"]
+async fn live_anthropic_provider_emits_native_tool_calls() {
+    let provider = LiveAnthropicConfig::from_env().provider();
     let response = provider
         .complete(
             ModelRequest::new(vec![Message::new(
@@ -104,7 +106,8 @@ async fn live_provider_emits_native_tool_calls() {
                     "required": ["marker"],
                     "additionalProperties": false
                 }),
-            }),
+            })
+            .with_max_output_tokens(256),
         )
         .await
         .expect("live tool-call completion should succeed");
@@ -167,9 +170,9 @@ impl Tool for ProbeTool {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenAI-compatible credentials in .env"]
-async fn live_runtime_executes_tool_and_loads_skill() {
-    let provider: Arc<dyn ModelProvider> = Arc::new(LiveProviderConfig::from_env().provider());
+#[ignore = "requires live Anthropic-compatible credentials in .env"]
+async fn live_anthropic_runtime_executes_tool_and_loads_skill() {
+    let provider: Arc<dyn ModelProvider> = Arc::new(LiveAnthropicConfig::from_env().provider());
     let temp = tempdir().expect("tempdir should exist");
     let skill_dir = temp.path().join("runtime-smoke");
     fs::create_dir_all(&skill_dir).expect("skill dir should exist");
@@ -192,7 +195,10 @@ async fn live_runtime_executes_tool_and_loads_skill() {
         .expect("agent should build");
 
     let result = agent
-        .run("run the smoke test".to_owned(), "live-runtime-skill")
+        .run(
+            "run the smoke test".to_owned(),
+            "live-anthropic-runtime-skill",
+        )
         .await
         .expect("runtime smoke test should complete");
 

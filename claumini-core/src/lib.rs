@@ -14,7 +14,7 @@ pub use model::{
     ProviderCapabilities, ToolCall, ToolSchema,
 };
 pub use payload::{ArtifactId, Payload};
-pub use runtime::{AgentContext, RuntimeLimits, SessionMetadata, ToolContext};
+pub use runtime::{AgentContext, MaxTurnsPolicy, RuntimeLimits, SessionMetadata, ToolContext};
 pub use tool::{Tool, ToolDescriptor};
 
 #[cfg(test)]

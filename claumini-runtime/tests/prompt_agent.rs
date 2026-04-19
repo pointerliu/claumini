@@ -496,6 +496,76 @@ async fn prompt_agent_enforces_max_turns_per_session() {
 }
 
 #[tokio::test]
+async fn prompt_agent_force_final_policy_nudges_and_returns_final_output() {
+    let provider = ScriptedProvider::new(vec![
+        // Turn 1: tool call that consumes the single allowed tool turn.
+        ModelResponse {
+            message: None,
+            tool_calls: vec![claumini_core::ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: json!({"question": "loop"}),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+        },
+        // Turn 2 (post-nudge force-final): plain text response, no tools.
+        ModelResponse::text("forced final answer"),
+    ]);
+
+    let provider = Arc::new(provider);
+    let agent = PromptAgentBuilder::new(provider.clone())
+        .system_prompt("You are helpful.")
+        .tool(LookupTool)
+        .reserved_runtime_tools(ReservedRuntimeTools::default().with_finish(false))
+        .limits(RuntimeLimits {
+            max_turns_per_session: 1,
+            max_turns_policy: claumini_core::MaxTurnsPolicy::ForceFinal { nudge: None },
+            ..RuntimeLimits::default()
+        })
+        .json_input::<UserQuestion>()
+        .text_output()
+        .build()
+        .expect("agent should build");
+
+    let session = agent
+        .run(
+            UserQuestion {
+                question: "loop".into(),
+            },
+            "session-force-final",
+        )
+        .await
+        .expect("force-final policy should yield a session");
+
+    assert_eq!(session.output, "forced final answer");
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2, "expected exactly two provider calls");
+    assert!(
+        !requests[0].tools.is_empty(),
+        "first request should include tool schemas"
+    );
+    assert!(
+        requests[1].tools.is_empty(),
+        "force-final request must drop tool schemas"
+    );
+
+    let final_messages = &requests[1].messages;
+    let nudge = final_messages
+        .last()
+        .expect("nudge should be appended to transcript");
+    assert_eq!(nudge.role, MessageRole::User);
+    let text = match &nudge.content {
+        Payload::Text(t) => t.as_str(),
+        _ => panic!("nudge payload should be text"),
+    };
+    assert!(
+        text.contains("tool-use budget"),
+        "default nudge should mention tool-use budget, got: {text}"
+    );
+}
+
+#[tokio::test]
 async fn prompt_agent_times_out_provider_requests() {
     let provider = ScriptedProvider::new(vec![ModelResponse::text("late")])
         .with_delay(Duration::from_millis(30));

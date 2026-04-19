@@ -116,7 +116,7 @@ struct OpenAiChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<OpenAiResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
-max_tokens: Option<u32>,
+    max_tokens: Option<u32>,
 }
 
 impl OpenAiChatRequest {

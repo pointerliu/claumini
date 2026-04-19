@@ -319,10 +319,38 @@ where
         loop {
             turn += 1;
             if turn > limits.max_turns_per_session {
-                return Err(AgentError::Runtime(RuntimeError::LimitExceeded {
-                    limit: "max_turns_per_session",
-                    value: turn,
-                }));
+                match limits.max_turns_policy.nudge_text() {
+                    None => {
+                        return Err(AgentError::Runtime(RuntimeError::LimitExceeded {
+                            limit: "max_turns_per_session",
+                            value: turn,
+                        }));
+                    }
+                    Some(nudge) => {
+                        let nudge_msg =
+                            Message::new(MessageRole::User, Payload::text(nudge.to_string()));
+                        session.transcript.push(nudge_msg);
+
+                        let mut request = self.build_request(&session, provider_capabilities);
+                        request.tools.clear();
+                        let response = self.complete_with_retry(request, &limits).await?;
+
+                        if let Some(message) = assistant_response_message(&response) {
+                            session.transcript.push(message);
+                        }
+
+                        let final_message = response.message.ok_or_else(|| {
+                            AgentError::Runtime(RuntimeError::Message(
+                                "force-final turn produced no message".into(),
+                            ))
+                        })?;
+
+                        record_payload_artifacts(&mut session, &final_message.content);
+                        let output = (self.output_decoder)(final_message.content)?;
+                        session.state = SessionState::Finished;
+                        return Ok(PromptSession { output, session });
+                    }
+                }
             }
 
             let request = self.build_request(&session, provider_capabilities);
