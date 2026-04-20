@@ -133,8 +133,7 @@ impl OpenAiChatRequest {
             messages.push(OpenAiRequestMessage::from_message(message)?);
         }
 
-        let mut tools: Vec<OpenAiTool> =
-            request.tools.iter().map(OpenAiTool::from_tool).collect();
+        let mut tools: Vec<OpenAiTool> = request.tools.iter().map(OpenAiTool::from_tool).collect();
         if let Some(schema) = request.response_schema {
             if request
                 .tools
@@ -288,6 +287,12 @@ struct OpenAiChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiAssistantMessage {
     content: Option<String>,
+    /// Non-standard but common field emitted by reasoning / chain-of-thought
+    /// OpenAI-compatible providers (DeepSeek-R1, Qwen, vLLM, etc.). Carries
+    /// the model's internal reasoning and MUST NOT be treated as actionable
+    /// output — structured-output decoders would try to parse prose as JSON.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<OpenAiResponseToolCall>,
 }
@@ -312,6 +317,7 @@ fn normalize_response(body: OpenAiChatResponse) -> Result<ModelResponse, Provide
 
     let OpenAiAssistantMessage {
         content,
+        reasoning_content,
         tool_calls: raw_tool_calls,
     } = choice.message;
 
@@ -332,24 +338,62 @@ fn normalize_response(body: OpenAiChatResponse) -> Result<ModelResponse, Provide
         });
     }
 
+    let thinking_text = reasoning_content
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     if let Some(arguments) = final_answer {
         let text = serde_json::to_string(&arguments).map_err(|err| {
             ProviderError::Message(format!("failed to serialize final answer: {err}"))
         })?;
+        let mut msg = Message::new(MessageRole::Assistant, Payload::text(text));
+        if let Some(t) = thinking_text {
+            msg = msg.with_thinking(t);
+        }
         return Ok(ModelResponse {
-            message: Some(Message::new(MessageRole::Assistant, Payload::text(text))),
+            message: Some(msg),
             tool_calls,
             finish_reason: FinishReason::Stop,
         });
     }
 
-    let message = content.and_then(|content| {
-        if content.is_empty() {
-            None
-        } else {
-            Some(Message::new(MessageRole::Assistant, Payload::text(content)))
+    // Reasoning-only turn: the model emitted chain-of-thought but no visible
+    // text and no tool calls. Feeding reasoning_content into the structured-
+    // output decoder would fail with a confusing "expected value" error, so
+    // surface a temporary provider error instead to let the retry layer
+    // try again.
+    let content_empty = content.as_deref().map(str::is_empty).unwrap_or(true);
+    if content_empty
+        && tool_calls.is_empty()
+        && let Some(ref t) = thinking_text
+    {
+        let preview: String = t.chars().take(200).collect();
+        return Err(ProviderError::Temporary(format!(
+            "openai-compatible provider returned only `reasoning_content` \
+             with no `content` or `tool_calls`; preview: {preview:?}"
+        )));
+    }
+
+    let message = match (content, thinking_text) {
+        (Some(text), thinking) if !text.is_empty() => {
+            let mut msg = Message::new(MessageRole::Assistant, Payload::text(text));
+            if let Some(t) = thinking {
+                msg = msg.with_thinking(t);
+            }
+            Some(msg)
         }
-    });
+        (_, Some(t)) => {
+            // No visible text but we have tool_calls alongside reasoning —
+            // carry the reasoning on an empty-content assistant message so
+            // the transcript preserves it.
+            Some(
+                Message::new(MessageRole::Assistant, Payload::text(String::new())).with_thinking(t),
+            )
+        }
+        _ => None,
+    };
 
     Ok(ModelResponse {
         finish_reason: map_finish_reason(choice.finish_reason.as_deref(), !tool_calls.is_empty()),

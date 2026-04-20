@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use crate::{ArtifactId, Payload};
 
 /// How a `PromptAgent` loop should behave when `max_turns_per_session` is reached.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MaxTurnsPolicy {
     /// Abort the session with `RuntimeError::LimitExceeded` (default, preserves v0 behavior).
+    #[default]
     Error,
     /// Append a nudge message telling the LLM its tool budget is exhausted and request one
     /// final response with no further tool calls. The provider is called one more time with
@@ -16,12 +17,6 @@ pub enum MaxTurnsPolicy {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nudge: Option<String>,
     },
-}
-
-impl Default for MaxTurnsPolicy {
-    fn default() -> Self {
-        Self::Error
-    }
 }
 
 impl MaxTurnsPolicy {

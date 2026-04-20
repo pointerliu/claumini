@@ -28,6 +28,13 @@ pub struct Message {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
+    /// Provider-supplied chain-of-thought / reasoning for this message.
+    /// Populated from Anthropic `thinking` / `redacted_thinking` blocks and
+    /// OpenAI-compatible `reasoning_content`. Opaque to decoders — never
+    /// forwarded to structured-output parsers — but preserved on the
+    /// transcript so callers can persist the full chat history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 impl Message {
@@ -37,6 +44,7 @@ impl Message {
             content,
             name: None,
             tool_calls: Vec::new(),
+            thinking: None,
         }
     }
 
@@ -47,6 +55,12 @@ impl Message {
 
     pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
         self.tool_calls = tool_calls;
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: impl Into<String>) -> Self {
+        let text = thinking.into();
+        self.thinking = (!text.is_empty()).then_some(text);
         self
     }
 }

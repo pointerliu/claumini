@@ -260,6 +260,21 @@ enum ClaudeResponseContent {
         name: String,
         input: serde_json::Value,
     },
+    /// Extended-thinking block. Not user-facing: the `thinking` field carries
+    /// the model's chain-of-thought and must not be treated as actionable
+    /// output.
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
+    /// Redacted-thinking block returned when Anthropic's safety filter
+    /// obscures the chain-of-thought. Opaque to us.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        #[serde(default, rename = "data")]
+        _data: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -268,6 +283,7 @@ fn normalize_response(body: ClaudeResponse) -> Result<ModelResponse, ProviderErr
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
     let mut final_answer: Option<serde_json::Value> = None;
+    let mut thinking_parts: Vec<String> = Vec::new();
 
     for block in body.content {
         match block {
@@ -277,7 +293,13 @@ fn normalize_response(body: ClaudeResponse) -> Result<ModelResponse, ProviderErr
                 }
             }
             ClaudeResponseContent::ToolUse { id, name, input } => {
-                if name == FINAL_ANSWER_TOOL_NAME {
+                if is_final_answer_tool_name(&name) {
+                    if name != FINAL_ANSWER_TOOL_NAME {
+                        eprintln!(
+                            "claude provider: accepting mistyped final-answer \
+                             tool name '{name}' (expected '{FINAL_ANSWER_TOOL_NAME}')"
+                        );
+                    }
                     final_answer = Some(input);
                     continue;
                 }
@@ -287,27 +309,91 @@ fn normalize_response(body: ClaudeResponse) -> Result<ModelResponse, ProviderErr
                     arguments: input,
                 });
             }
+            ClaudeResponseContent::Thinking { thinking } => {
+                if !thinking.is_empty() {
+                    thinking_parts.push(thinking);
+                }
+            }
+            ClaudeResponseContent::RedactedThinking { .. } => {
+                thinking_parts.push("[redacted_thinking]".into());
+            }
             ClaudeResponseContent::Other => {}
         }
     }
+
+    let thinking_text = if thinking_parts.is_empty() {
+        None
+    } else {
+        Some(thinking_parts.join("\n"))
+    };
 
     if let Some(arguments) = final_answer {
         let text = serde_json::to_string(&arguments).map_err(|err| {
             ProviderError::Message(format!("failed to serialize final answer: {err}"))
         })?;
+        let mut msg = Message::new(MessageRole::Assistant, Payload::text(text));
+        if let Some(t) = thinking_text {
+            msg = msg.with_thinking(t);
+        }
         return Ok(ModelResponse {
-            message: Some(Message::new(MessageRole::Assistant, Payload::text(text))),
+            message: Some(msg),
             tool_calls,
             finish_reason: FinishReason::Stop,
         });
     }
 
+    // If the turn carried only a thinking/redacted-thinking block and no
+    // actionable output, the runtime has nothing to decode. Return a
+    // temporary error so the retry layer can try again — the thinking text
+    // itself is dropped here but would be lost anyway since this turn never
+    // lands on the transcript.
+    if text_parts.is_empty()
+        && tool_calls.is_empty()
+        && let Some(ref t) = thinking_text
+    {
+        let preview: String = t.chars().take(200).collect();
+        return Err(ProviderError::Temporary(format!(
+            "claude returned only a thinking/redacted_thinking block with \
+             no text or tool_use; preview: {preview:?}"
+        )));
+    }
+
+    let message = if text_parts.is_empty() {
+        // No text, but we have tool_calls and/or thinking — still build a
+        // message so the thinking is preserved on the transcript.
+        thinking_text
+            .as_ref()
+            .map(|_| Message::new(MessageRole::Assistant, Payload::text(String::new())))
+    } else {
+        Some(Message::new(
+            MessageRole::Assistant,
+            Payload::text(text_parts.join("\n")),
+        ))
+    };
+    let message = match (message, thinking_text) {
+        (Some(msg), Some(t)) => Some(msg.with_thinking(t)),
+        (Some(msg), None) => Some(msg),
+        (None, _) => None,
+    };
+
     Ok(ModelResponse {
-        message: (!text_parts.is_empty())
-            .then(|| Message::new(MessageRole::Assistant, Payload::text(text_parts.join("\n")))),
+        message,
         finish_reason: map_finish_reason(body.stop_reason.as_deref(), !tool_calls.is_empty()),
         tool_calls,
     })
+}
+
+/// Matches the reserved final-answer tool name, tolerating small typos in
+/// the model's output. Claude sometimes misspells the tool name (e.g.
+/// `__claumaini_final_answer` with an extra `a`); strict equality would
+/// then drop the structured answer and fail the run with
+/// "model called unavailable tool". We accept any name that follows the
+/// reserved `__*_final_answer` shape to normalise it to the final answer.
+fn is_final_answer_tool_name(name: &str) -> bool {
+    if name == FINAL_ANSWER_TOOL_NAME {
+        return true;
+    }
+    name.starts_with("__") && name.ends_with("_final_answer")
 }
 
 fn map_finish_reason(stop_reason: Option<&str>, has_tool_calls: bool) -> FinishReason {

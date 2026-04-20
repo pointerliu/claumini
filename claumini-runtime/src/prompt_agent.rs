@@ -1751,11 +1751,92 @@ where
 {
     match payload {
         Payload::Json(value) => serde_json::from_value(value).map_err(json_decode_error),
-        Payload::Text(text) => serde_json::from_str(&text).map_err(json_decode_error),
+        Payload::Text(text) => {
+            if let Ok(v) = serde_json::from_str::<T>(&text) {
+                return Ok(v);
+            }
+            // Fallback: the model skipped the structured-output tool and
+            // produced prose only. Try to salvage an embedded JSON object
+            // (common shapes: ```json { ... } ```, or plain `{ ... }` in
+            // the body) before surfacing a decode error.
+            if let Some(snippet) = extract_embedded_json(&text)
+                && let Ok(v) = serde_json::from_str::<T>(&snippet)
+            {
+                return Ok(v);
+            }
+            serde_json::from_str::<T>(&text).map_err(json_decode_error)
+        }
         Payload::Artifact(_) => Err(AgentError::Runtime(RuntimeError::Message(
             "expected json output payload, received artifact".into(),
         ))),
     }
+}
+
+/// Pulls the first top-level JSON object out of a free-form model reply.
+/// Handles both ```json ... ``` fenced blocks and a raw balanced-brace span.
+/// Returns `None` when no plausible JSON object is found.
+fn extract_embedded_json(text: &str) -> Option<String> {
+    // 1. fenced ```json ... ``` or ``` ... ``` blocks
+    for fence in ["```json", "```JSON", "```"] {
+        if let Some(start) = text.find(fence) {
+            let after = &text[start + fence.len()..];
+            if let Some(end) = after.find("```") {
+                let body = after[..end].trim();
+                if body.starts_with('{')
+                    && let Some(obj) = balanced_json_object(body)
+                {
+                    return Some(obj);
+                }
+            }
+        }
+    }
+    // 2. first balanced `{ ... }` anywhere in the text
+    let bytes = text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'{'
+            && let Some(obj) = balanced_json_object(&text[i..])
+        {
+            return Some(obj);
+        }
+    }
+    None
+}
+
+/// Scans forward from the first `{` and returns the substring up to the
+/// matching `}`, respecting string literals and escapes. Returns `None` if
+/// the braces never balance.
+fn balanced_json_object(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn json_decode_error(error: serde_json::Error) -> AgentError {
@@ -1775,7 +1856,7 @@ mod tests {
     use claumini_core::Payload;
     use serde_json::json;
 
-    use super::finish_payload;
+    use super::{extract_embedded_json, finish_payload};
 
     #[test]
     fn finish_payload_prefers_explicit_payload_shape() {
@@ -1788,5 +1869,31 @@ mod tests {
         .expect("finish payload should decode");
 
         assert_eq!(payload, Payload::text("done"));
+    }
+
+    #[test]
+    fn extract_embedded_json_pulls_fenced_block() {
+        let text = "Here is my answer:\n```json\n{\"ok\": true, \"n\": 3}\n```\nBye.";
+        let got = extract_embedded_json(text).expect("should find block");
+        assert_eq!(got, "{\"ok\": true, \"n\": 3}");
+    }
+
+    #[test]
+    fn extract_embedded_json_pulls_bare_object() {
+        let text = "Reasoning... final: {\"is_root_cause\": false, \"next_signals\": [\"a\"]}";
+        let got = extract_embedded_json(text).expect("should find object");
+        assert_eq!(got, "{\"is_root_cause\": false, \"next_signals\": [\"a\"]}");
+    }
+
+    #[test]
+    fn extract_embedded_json_respects_strings_with_braces() {
+        let text = "note: {\"msg\": \"hi }{\", \"ok\": true}";
+        let got = extract_embedded_json(text).expect("should find object");
+        assert_eq!(got, "{\"msg\": \"hi }{\", \"ok\": true}");
+    }
+
+    #[test]
+    fn extract_embedded_json_returns_none_without_object() {
+        assert!(extract_embedded_json("no json here").is_none());
     }
 }

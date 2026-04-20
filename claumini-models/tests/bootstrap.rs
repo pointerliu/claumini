@@ -213,7 +213,7 @@ async fn openai_provider_posts_chat_completions_and_normalizes_response() {
                 {
                     "type": "function",
                     "function": {
-                        "name": "__claumini_final_answer",
+                        "name": "__final_answer",
                         "description": "Return the final answer as a structured object matching the requested schema. Call this exactly once, after all other investigation is complete, with the definitive answer. Do not call other tools after this one.",
                         "parameters": {
                             "type": "object",
@@ -610,7 +610,7 @@ async fn openai_provider_surfaces_synthetic_final_answer_as_assistant_text() {
                                 "id": "call_final",
                                 "type": "function",
                                 "function": {
-                                    "name": "__claumini_final_answer",
+                                    "name": "__final_answer",
                                     "arguments": "{\"answer\":\"SF\"}"
                                 }
                             }
@@ -663,7 +663,7 @@ async fn claude_provider_surfaces_synthetic_final_answer_as_assistant_text() {
                 {
                     "type": "tool_use",
                     "id": "toolu_final",
-                    "name": "__claumini_final_answer",
+                    "name": "__final_answer",
                     "input": { "answer": "SF" }
                 }
             ]
