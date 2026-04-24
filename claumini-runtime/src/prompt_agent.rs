@@ -3,6 +3,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use claumini_core::{
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
+use tracing::{debug, info, warn};
 
 use crate::{
     ArtifactStore, FINISH_TOOL_NAME, LOAD_SKILL_TOOL_NAME, RESERVED_TOOL_NAMES, SessionRecord,
@@ -318,6 +320,13 @@ where
         let mut turn = 0usize;
         loop {
             turn += 1;
+            debug!(
+                session_id = %session.metadata.session_id,
+                turn,
+                transcript_messages = session.transcript.len(),
+                recorded_tool_calls = session.tool_calls.len(),
+                "prompt agent turn start"
+            );
             if turn > limits.max_turns_per_session {
                 match limits.max_turns_policy.nudge_text() {
                     None => {
@@ -354,7 +363,25 @@ where
             }
 
             let request = self.build_request(&session, provider_capabilities);
+            debug!(
+                session_id = %session.metadata.session_id,
+                turn,
+                request_messages = request.messages.len(),
+                request_tools = request.tools.len(),
+                has_system_prompt = request.system_prompt.is_some(),
+                has_response_schema = request.response_schema.is_some(),
+                max_output_tokens = ?request.max_output_tokens,
+                "dispatching model request"
+            );
             let response = self.complete_with_retry(request, &limits).await?;
+            debug!(
+                session_id = %session.metadata.session_id,
+                turn,
+                finish_reason = ?response.finish_reason,
+                tool_calls = response.tool_calls.len(),
+                has_message = response.message.is_some(),
+                "model response received"
+            );
 
             if let Some(message) = assistant_response_message(&response) {
                 session.transcript.push(message);
@@ -447,16 +474,67 @@ where
         let timeout_duration = Duration::from_millis(limits.model_request_timeout_ms);
 
         for attempt in 1..=MAX_PROVIDER_ATTEMPTS {
+            let started_at = Instant::now();
             match timeout(timeout_duration, self.provider.complete(request.clone())).await {
-                Err(_) if attempt < MAX_PROVIDER_ATTEMPTS => continue,
-                Err(_) => return Err(AgentError::Provider(ProviderError::Timeout)),
-                Ok(Ok(response)) => return Ok(response),
+                Err(_) if attempt < MAX_PROVIDER_ATTEMPTS => {
+                    warn!(
+                        attempt,
+                        timeout_ms = limits.model_request_timeout_ms,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        request_messages = request.messages.len(),
+                        request_tools = request.tools.len(),
+                        "model request timed out; retrying"
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    warn!(
+                        attempt,
+                        timeout_ms = limits.model_request_timeout_ms,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        request_messages = request.messages.len(),
+                        request_tools = request.tools.len(),
+                        "model request timed out"
+                    );
+                    return Err(AgentError::Provider(ProviderError::Timeout));
+                }
+                Ok(Ok(response)) => {
+                    info!(
+                        attempt,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        request_messages = request.messages.len(),
+                        request_tools = request.tools.len(),
+                        finish_reason = ?response.finish_reason,
+                        response_tool_calls = response.tool_calls.len(),
+                        has_message = response.message.is_some(),
+                        "model request completed"
+                    );
+                    return Ok(response);
+                }
                 Ok(Err(error))
                     if is_transient_provider_error(&error) && attempt < MAX_PROVIDER_ATTEMPTS =>
                 {
+                    warn!(
+                        attempt,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        request_messages = request.messages.len(),
+                        request_tools = request.tools.len(),
+                        error = %error,
+                        "transient provider error; retrying"
+                    );
                     continue;
                 }
-                Ok(Err(error)) => return Err(AgentError::Provider(error)),
+                Ok(Err(error)) => {
+                    warn!(
+                        attempt,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        request_messages = request.messages.len(),
+                        request_tools = request.tools.len(),
+                        error = %error,
+                        "provider request failed"
+                    );
+                    return Err(AgentError::Provider(error));
+                }
             }
         }
 
@@ -517,6 +595,13 @@ where
         runtime_state: &mut SessionRuntimeState,
     ) -> Result<Option<Payload>, AgentError> {
         for call in tool_calls {
+            debug!(
+                session_id = %session.metadata.session_id,
+                tool_call_id = %call.id,
+                tool_name = %call.name,
+                tool_arguments = %call.arguments,
+                "executing tool call"
+            );
             let record_index = session.tool_calls.len();
             session.tool_calls.push(ToolCallRecord {
                 index: record_index,

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use async_trait::async_trait;
 use claumini_core::{
     FinishReason, Message, MessageRole, ModelProvider, ModelRequest, ModelResponse, Payload,
@@ -6,6 +8,7 @@ use claumini_core::{
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::{debug, warn};
 
 use crate::{
     ConfigError, FINAL_ANSWER_TOOL_DESCRIPTION, FINAL_ANSWER_TOOL_NAME, OpenAiCompatibleConfig,
@@ -76,6 +79,17 @@ impl OpenAiCompatibleProvider {
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ProviderError> {
         let chat_request = OpenAiChatRequest::from_request(&self.config.model, request.clone())?;
+        let request_started_at = Instant::now();
+        debug!(
+            base_url = %self.config.base_url,
+            model = %self.config.model,
+            request_messages = chat_request.messages.len(),
+            request_tools = chat_request.tools.len(),
+            max_tokens = ?chat_request.max_tokens,
+            has_system_prompt = request.system_prompt.is_some(),
+            has_response_schema = request.response_schema.is_some(),
+            "sending openai-compatible chat completion request"
+        );
         let response = self
             .client
             .post(format!(
@@ -90,12 +104,54 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(map_status_error(status, response.text().await.ok()));
+            let body = response.text().await.ok();
+            warn!(
+                base_url = %self.config.base_url,
+                model = %self.config.model,
+                status = %status,
+                elapsed_ms = request_started_at.elapsed().as_millis(),
+                body_preview = ?body.as_deref().map(|text| text.chars().take(400).collect::<String>()),
+                "openai-compatible chat completion request failed"
+            );
+            return Err(map_status_error(status, body));
         }
 
-        let body = response.json::<OpenAiChatResponse>().await.map_err(|err| {
-            ProviderError::Message(format!("failed to decode openai response: {err}"))
+        debug!(
+            base_url = %self.config.base_url,
+            model = %self.config.model,
+            status = %status,
+            elapsed_ms = request_started_at.elapsed().as_millis(),
+            "openai-compatible chat completion response headers received"
+        );
+
+        let decode_started_at = Instant::now();
+        let response_text = response.text().await.map_err(|err| {
+            ProviderError::Temporary(format!(
+                "failed to read openai response body: {err:?}"
+            ))
         })?;
+        let body = serde_json::from_str::<OpenAiChatResponse>(&response_text).map_err(|err| {
+            let preview: String = response_text.chars().take(400).collect();
+            warn!(
+                base_url = %self.config.base_url,
+                model = %self.config.model,
+                elapsed_ms = request_started_at.elapsed().as_millis(),
+                decode_elapsed_ms = decode_started_at.elapsed().as_millis(),
+                body_preview = %preview,
+                "failed to decode openai-compatible chat completion response"
+            );
+            ProviderError::Temporary(format!(
+                "failed to decode openai response: {err}; body preview: {preview:?}"
+            ))
+        })?;
+        debug!(
+            base_url = %self.config.base_url,
+            model = %self.config.model,
+            elapsed_ms = request_started_at.elapsed().as_millis(),
+            decode_elapsed_ms = decode_started_at.elapsed().as_millis(),
+            choices = body.choices.len(),
+            "decoded openai-compatible chat completion response"
+        );
 
         normalize_response(body)
     }
@@ -162,6 +218,8 @@ struct OpenAiRequestMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiRequestToolCall>>,
@@ -172,18 +230,26 @@ impl OpenAiRequestMessage {
         Self {
             role,
             content: Some(content),
+            reasoning_content: None,
             tool_call_id: None,
             tool_calls: None,
         }
     }
 
     fn from_message(message: Message) -> Result<Self, ProviderError> {
+        let thinking = message
+            .thinking
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned);
         match message.role {
             MessageRole::System => Ok(Self::text("system", payload_to_string(&message.content)?)),
             MessageRole::User => Ok(Self::text("user", payload_to_string(&message.content)?)),
             MessageRole::Assistant if !message.tool_calls.is_empty() => Ok(Self {
                 role: "assistant",
                 content: Some(payload_to_string(&message.content)?),
+                reasoning_content: thinking,
                 tool_call_id: None,
                 tool_calls: Some(
                     message
@@ -193,13 +259,17 @@ impl OpenAiRequestMessage {
                         .collect(),
                 ),
             }),
-            MessageRole::Assistant => Ok(Self::text(
-                "assistant",
-                payload_to_string(&message.content)?,
-            )),
+            MessageRole::Assistant => Ok(Self {
+                role: "assistant",
+                content: Some(payload_to_string(&message.content)?),
+                reasoning_content: thinking,
+                tool_call_id: None,
+                tool_calls: None,
+            }),
             MessageRole::Tool => Ok(Self {
                 role: "tool",
                 content: Some(payload_to_string(&message.content)?),
+                reasoning_content: None,
                 tool_call_id: Some(message.name.unwrap_or_else(|| "tool".into())),
                 tool_calls: None,
             }),

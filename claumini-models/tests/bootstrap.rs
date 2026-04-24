@@ -1,5 +1,6 @@
 use claumini_core::{
-    Message, MessageRole, ModelProvider, ModelRequest, Payload, ToolCall, ToolSchema,
+    Message, MessageRole, ModelProvider, ModelRequest, Payload, ProviderError, ToolCall,
+    ToolSchema,
 };
 use claumini_models::{
     ClaudeConfig, ClaudeProvider, ConfigError, MockProvider, OpenAiCompatibleConfig,
@@ -398,6 +399,85 @@ async fn openai_provider_round_trips_assistant_tool_call_turns_in_follow_up_requ
 }
 
 #[tokio::test]
+async fn openai_provider_round_trips_assistant_reasoning_content_in_follow_up_requests() {
+    let server = MockServer::start().await;
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "gpt-test".into(),
+        max_tokens: None,
+    })
+    .expect("provider should build");
+
+    let request = ModelRequest::new(vec![
+        Message::new(MessageRole::User, Payload::text("Investigate mismatch")),
+        Message::new(MessageRole::Assistant, Payload::text("")).with_tool_calls(vec![ToolCall {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            arguments: json!({"id": "ibex"}),
+        }])
+        .with_thinking("Need to inspect coverage first."),
+        Message::new(
+            MessageRole::Tool,
+            Payload::json(json!({"module": "ibex_top"})).expect("json payload"),
+        )
+        .named("call_1"),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_json(json!({
+            "model": "gpt-test",
+            "messages": [
+                { "role": "user", "content": "Investigate mismatch" },
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Need to inspect coverage first.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": "{\"id\":\"ibex\"}"
+                            }
+                        }
+                    ]
+                },
+                { "role": "tool", "tool_call_id": "call_1", "content": "{\"module\":\"ibex_top\"}" }
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Final answer"
+                    }
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let response = provider
+        .complete(request)
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(
+        response
+            .message
+            .expect("assistant message")
+            .content
+            .as_text(),
+        Some("Final answer")
+    );
+}
+
+#[tokio::test]
 async fn claude_provider_posts_messages_and_normalizes_response() {
     let server = MockServer::start().await;
     let provider = ClaudeProvider::new_with_base_url(claude_config(), server.uri())
@@ -637,6 +717,37 @@ async fn openai_provider_surfaces_synthetic_final_answer_as_assistant_text() {
             .as_text(),
         Some("{\"answer\":\"SF\"}")
     );
+}
+
+#[tokio::test]
+async fn openai_provider_treats_invalid_json_body_as_temporary_error() {
+    let server = MockServer::start().await;
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "gpt-test".into(),
+        max_tokens: None,
+    })
+    .expect("provider should build");
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw("not-json", "application/json"),
+        )
+        .mount(&server)
+        .await;
+
+    let error = provider
+        .complete(ModelRequest::new(vec![Message::new(
+            MessageRole::User,
+            Payload::text("Hello"),
+        )]))
+        .await
+        .expect_err("invalid body should fail");
+
+    assert!(matches!(error, ProviderError::Temporary(_)));
 }
 
 #[tokio::test]
